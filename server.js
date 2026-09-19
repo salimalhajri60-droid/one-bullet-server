@@ -383,6 +383,9 @@ wss.on("connection", (ws, req) => {
             melee: !!m.melee || p.input.melee,
             pickup: !!m.pickup || p.input.pickup,
             emote: !!m.emote || p.input.emote,
+            ping: Number.isFinite(m.ping)
+              ? Math.max(0, Math.min(350, m.ping))
+              : (p.input.ping || 0),
           };
           p.lastInput = Date.now();
         }
@@ -507,7 +510,7 @@ setInterval(() => {
     }
     acc -= 1 / 60;
   }
-  if (++frame % 3 === 0)
+  if (++frame % 2 === 0)
     for (const r of rooms.values())
       if (r.status === "playing")
         broadcast(r, { type: "state", state: snapshot(r.game) });
