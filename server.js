@@ -60,6 +60,31 @@ const send = (s, data) => {
   if (s?.ws?.readyState === WebSocket.OPEN && s.ws.bufferedAmount < 250000)
     s.ws.send(JSON.stringify(data));
 };
+
+const CHAT_LIMIT = 120;
+const CHAT_COOLDOWN_MS = 650;
+const chatFilters = [
+  /\bn[\W_]*[i1!|][\W_]*g[\W_]*g[\W_]*[a@4]\b/gi,
+  /\bn[\W_]*[i1!|][\W_]*g[\W_]*g[\W_]*[e3][\W_]*r\b/gi,
+  /\bf[\W_]*[uüv][\W_]*c[\W_]*k(?:[\W_]*(?:e[\W_]*r|e[\W_]*d|i[\W_]*n[\W_]*g))?\b/gi,
+  /\bsh[\W_]*[i1!|][\W_]*t\b/gi,
+  /\bb[\W_]*[i1!|][\W_]*t[\W_]*c[\W_]*h\b/gi,
+  /\bc[\W_]*u[\W_]*n[\W_]*t\b/gi,
+  /\ba[\W_]*s[\W_]*s[\W_]*h[\W_]*o[\W_]*l[\W_]*e\b/gi,
+  /\bm[\W_]*o[\W_]*t[\W_]*h[\W_]*e[\W_]*r[\W_]*f[\W_]*u[\W_]*c[\W_]*k[\W_]*e[\W_]*r\b/gi,
+];
+
+function cleanChatText(value) {
+  let text = String(value || "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, CHAT_LIMIT);
+
+  for (const pattern of chatFilters) text = text.replace(pattern, "****");
+  return text;
+}
+
 const publicLobby = (r) => ({
   code: r.code,
   host: r.host,
@@ -428,6 +453,25 @@ wss.on("connection", (ws, req) => {
         return;
       }
       const r = rooms.get(s.room);
+
+      if (m.type === "chat") {
+        if (!r) throw Error("Join a room before using chat.");
+        const now = Date.now();
+        if (now - (s.lastChatAt || 0) < CHAT_COOLDOWN_MS) return;
+        const text = cleanChatText(m.text);
+        if (!text) return;
+
+        s.lastChatAt = now;
+        broadcast(r, {
+          type: "chat",
+          id: s.id,
+          name: s.name,
+          text,
+          at: now,
+        });
+        return;
+      }
+
       if (m.type === "input") {
         const p = r?.game?.players.find((p) => p.id === s.id);
         if (r?.status === "playing" && p) {
