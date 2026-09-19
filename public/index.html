@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#071522" />
+    <meta
+      name="description"
+      content="One bullet. Every shot matters. A fast multiplayer arena shooter. Play online, with friends, or against bots."
+    />
+    <title>ONE BULLET — Every shot matters</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <canvas id="game" aria-label="ONE BULLET arena"></canvas>
+    <div id="app"><div style="min-height:100vh;display:grid;place-content:center;text-align:center;gap:20px" role="status"><h1 style="font-size:60px;color:#ffd05a">ONE BULLET</h1><p>Loading the arena…</p><progress aria-label="Loading game" style="width:260px;accent-color:#48d3ff"></progress></div></div>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <script src="config.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
