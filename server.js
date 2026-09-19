@@ -34,6 +34,22 @@ const clean = (v) =>
     .replace(/[<>\x00-\x1f]/g, "")
     .trim()
     .slice(0, 18) || "Player";
+const nameKey = (v) => clean(v).toLocaleLowerCase("en-US");
+const nameTaken = (name, except = null) => {
+  const key = nameKey(name);
+  return [...sessions.values()].some(
+    (other) =>
+      other !== except &&
+      other.ws?.readyState === WebSocket.OPEN &&
+      nameKey(other.name) === key,
+  );
+};
+const requireUniqueName = (name, except = null) => {
+  const value = clean(name);
+  if (nameTaken(value, except))
+    throw Error(`The name "${value}" is already being used by another player.`);
+  return value;
+};
 const options = (o) => ({
   map: MAPS[o?.map] ? o.map : "yard",
   mode: MODES[o?.mode] ? o.mode : "ffa",
@@ -101,7 +117,7 @@ function newRoom(s, kind, opts) {
     host: s.id,
     status: "lobby",
     created: Date.now(),
-    startAt: Date.now() + 3500,
+    startAt: Date.now() + 10000,
     game: null,
     recorded: false,
   };
@@ -117,7 +133,44 @@ function join(s, r) {
   s.room = r.code;
   s.ready = false;
   r.members.push(s);
+  if (r.kind === "public" && r.status === "lobby" && r.members.length >= 2)
+    r.startAt = Math.min(r.startAt, Date.now() + 2500);
   lobby(r);
+}
+
+function joinPublicInProgress(s, r) {
+  if (r.kind !== "public" || r.status !== "playing" || !r.game)
+    throw Error("This public match is not available.");
+  if (r.members.length >= 8) throw Error("This room is full.");
+
+  leave(s);
+  s.room = r.code;
+  s.ready = false;
+  r.members.push(s);
+
+  // Public matches begin with bots filling empty slots. Replace one bot
+  // with the arriving real player so late Quick Match users join the
+  // existing match instead of being split into a second server.
+  const bot = r.game.players.find((p) => p.bot);
+  if (bot) removePlayer(r.game, bot.id);
+
+  addPlayer(r.game, {
+    id: s.id,
+    name: s.name,
+    skin: s.skin,
+    pistol: s.pistol,
+    trail: s.trail,
+    emote: s.emote,
+    banner: s.banner,
+  });
+
+  lobby(r);
+  send(s, {
+    type: "start",
+    state: snapshot(r.game),
+    code: r.code,
+    kind: r.kind,
+  });
 }
 const botNames = ["Rex", "Nova", "Shadow", "Blaze", "Echo", "Ghost", "Pixel"];
 function start(r) {
@@ -328,6 +381,7 @@ wss.on("connection", (ws, req) => {
           ws.close();
           return;
         }
+        const requestedName = requireUniqueName(m.name);
         const token =
           typeof m.token === "string" && /^[a-f0-9]{64}$/.test(m.token)
             ? m.token
@@ -338,13 +392,13 @@ wss.on("connection", (ws, req) => {
           .slice(0, 24);
         s = sessions.get(id);
         if (!s) {
-          s = { id, token, name: clean(m.name), room: null, ready: false };
+          s = { id, token, name: requestedName, room: null, ready: false };
           sessions.set(id, s);
         }
         if (s.ws && s.ws !== ws) s.ws.close(1000, "Connected elsewhere");
         s.ws = ws;
         s.disconnected = 0;
-        s.name = clean(m.name);
+        s.name = requireUniqueName(requestedName, s);
         s.skin = String(m.skin || "Default").slice(0, 20);
         s.pistol = String(m.pistol || "Classic").slice(0, 20);
         s.trail = String(m.trail || "Default").slice(0, 20);
@@ -393,19 +447,43 @@ wss.on("connection", (ws, req) => {
       }
       if (m.type === "profile") {
         if (r?.status === "playing") return;
-        s.name = clean(m.name);
+        s.name = requireUniqueName(m.name, s);
         for (const k of ["skin", "pistol", "trail", "emote", "banner"])
           s[k] = String(m[k] || s[k]).slice(0, 20);
         return;
       }
       if (m.type === "quick") {
         leave(s);
+
+        // Prefer a waiting public lobby first.
         let room = [...rooms.values()].find(
           (a) =>
-            a.kind === "public" && a.status === "lobby" && a.members.length < 8,
+            a.kind === "public" &&
+            a.status === "lobby" &&
+            a.members.length < 8,
         );
-        if (room) join(s, room);
-        else newRoom(s, "public", m.options);
+
+        if (room) {
+          join(s, room);
+          return;
+        }
+
+        // If a match has already started with bots, replace a bot with the
+        // arriving player instead of creating a separate public server.
+        room = [...rooms.values()].find(
+          (a) =>
+            a.kind === "public" &&
+            a.status === "playing" &&
+            a.members.length < 8 &&
+            a.game?.players?.some((p) => p.bot),
+        );
+
+        if (room) {
+          joinPublicInProgress(s, room);
+          return;
+        }
+
+        newRoom(s, "public", m.options);
         return;
       }
       if (m.type === "create") {
@@ -453,7 +531,7 @@ wss.on("connection", (ws, req) => {
         r.status = "lobby";
         r.game = null;
         for (const member of r.members) member.ready = false;
-        if (r.kind === "public") r.startAt = Date.now() + 3500;
+        if (r.kind === "public") r.startAt = Date.now() + 10000;
         lobby(r);
       }
     } catch (e) {
