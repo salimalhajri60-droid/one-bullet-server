@@ -38,10 +38,7 @@ const nameKey = (v) => clean(v).toLocaleLowerCase("en-US");
 const nameTaken = (name, except = null) => {
   const key = nameKey(name);
   return [...sessions.values()].some(
-    (other) =>
-      other !== except &&
-      other.ws?.readyState === WebSocket.OPEN &&
-      nameKey(other.name) === key,
+    (other) => other !== except && nameKey(other.name) === key,
   );
 };
 const requireUniqueName = (name, except = null) => {
@@ -267,7 +264,12 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, "http://local");
     if (url.pathname === "/health") {
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        "access-control-allow-origin": "*",
+        "access-control-allow-methods": "GET, OPTIONS",
+      });
       res.end(
         JSON.stringify({ ok: true, version: VERSION, rooms: rooms.size }),
       );
@@ -381,7 +383,6 @@ wss.on("connection", (ws, req) => {
           ws.close();
           return;
         }
-        const requestedName = requireUniqueName(m.name);
         const token =
           typeof m.token === "string" && /^[a-f0-9]{64}$/.test(m.token)
             ? m.token
@@ -390,7 +391,9 @@ wss.on("connection", (ws, req) => {
           .update(token)
           .digest("hex")
           .slice(0, 24);
-        s = sessions.get(id);
+        const existing = sessions.get(id);
+        const requestedName = requireUniqueName(m.name, existing);
+        s = existing;
         if (!s) {
           s = { id, token, name: requestedName, room: null, ready: false };
           sessions.set(id, s);
@@ -398,14 +401,14 @@ wss.on("connection", (ws, req) => {
         if (s.ws && s.ws !== ws) s.ws.close(1000, "Connected elsewhere");
         s.ws = ws;
         s.disconnected = 0;
-        s.name = requireUniqueName(requestedName, s);
+        s.name = requestedName;
         s.skin = String(m.skin || "Default").slice(0, 20);
         s.pistol = String(m.pistol || "Classic").slice(0, 20);
         s.trail = String(m.trail || "Default").slice(0, 20);
         s.emote = String(m.emote || "GG").slice(0, 20);
         s.banner = String(m.banner || "Rookie").slice(0, 20);
         clearTimeout(helloTimeout);
-        send(s, { type: "hello", id: s.id, token });
+        send(s, { type: "hello", id: s.id, token, name: s.name });
         const r = rooms.get(s.room);
         if (r) {
           send(s, { type: "lobby", lobby: publicLobby(r) });
