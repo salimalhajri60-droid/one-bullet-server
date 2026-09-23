@@ -2,7 +2,7 @@ import http from "node:http";
 import { readFile, writeFile, mkdir, rename } from "node:fs/promises";
 import { resolve, extname, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID, randomBytes, createHash } from "node:crypto";
+import { randomUUID, randomBytes, createHash, verify as cryptoVerify } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   createGame,
@@ -47,6 +47,47 @@ const requireUniqueName = (name, except = null) => {
     throw Error(`The name "${value}" is already being used by another player.`);
   return value;
 };
+// Verify CrazyGames JWTs on the server so registered usernames cannot be spoofed.
+let crazyPublicKey = "";
+let crazyPublicKeyAt = 0;
+const b64url = (value) => {
+  const x = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
+  return Buffer.from(x + "=".repeat((4 - (x.length % 4)) % 4), "base64");
+};
+async function fetchCrazyPublicKey(force = false) {
+  if (!force && crazyPublicKey && Date.now() - crazyPublicKeyAt < 6 * 3600000) return crazyPublicKey;
+  const response = await fetch("https://sdk.crazygames.com/publicKey.json", { signal: AbortSignal.timeout(5000), cache: "no-store" });
+  if (!response.ok) throw Error("CrazyGames public key unavailable");
+  const data = await response.json();
+  if (!data?.publicKey) throw Error("CrazyGames public key missing");
+  crazyPublicKey = String(data.publicKey);
+  crazyPublicKeyAt = Date.now();
+  return crazyPublicKey;
+}
+async function verifyCrazyToken(token) {
+  if (typeof token !== "string" || token.length < 80 || token.length > 6000) return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  let header, payload;
+  try {
+    header = JSON.parse(b64url(parts[0]).toString("utf8"));
+    payload = JSON.parse(b64url(parts[1]).toString("utf8"));
+  } catch { return null; }
+  if (header?.alg !== "RS256") return null;
+  const data = Buffer.from(`${parts[0]}.${parts[1]}`);
+  const sig = b64url(parts[2]);
+  let ok = false;
+  try {
+    ok = cryptoVerify("RSA-SHA256", data, await fetchCrazyPublicKey(), sig);
+    if (!ok) ok = cryptoVerify("RSA-SHA256", data, await fetchCrazyPublicKey(true), sig);
+  } catch { return null; }
+  if (!ok) return null;
+  const now = Math.floor(Date.now() / 1000);
+  if (!payload?.userId || !payload?.username || Number(payload.exp) <= now) return null;
+  if (process.env.CRAZYGAMES_GAME_ID && String(payload.gameId) !== String(process.env.CRAZYGAMES_GAME_ID)) return null;
+  return { userId: String(payload.userId).slice(0, 128), username: clean(payload.username) };
+}
+const stableCrazyId = (userId) => createHash("sha256").update(`crazygames:${userId}`).digest("hex").slice(0, 24);
 const options = (o) => ({
   map: MAPS[o?.map] ? o.map : "yard",
   mode: MODES[o?.mode] ? o.mode : "ffa",
@@ -226,54 +267,82 @@ function start(r) {
   });
 }
 let saving = Promise.resolve();
+function persistBoard() {
+  const data = JSON.stringify(board);
+  saving = saving.then(async () => {
+    const path = resolve(dataDir, "leaderboard.json");
+    await writeFile(path + ".tmp", data);
+    await rename(path + ".tmp", path);
+  }).catch((e) => console.error("Score persistence failed:", e.message));
+  return saving;
+}
+function mergeBoardRows(target, source) {
+  if (!target || !source || target === source) return target;
+  for (const field of ["wins", "kills", "deaths", "shots", "hits", "matches"]) target[field] = Number(target[field] || 0) + Number(source[field] || 0);
+  target.best = Math.max(Number(target.best || 0), Number(source.best || 0));
+  target.history = [...(target.history || []), ...(source.history || [])].filter((h) => Number(h?.at) > Date.now() - 7 * 86400000).sort((a,b) => Number(a.at) - Number(b.at));
+  if (!target.skin && source.skin) target.skin = source.skin;
+  if (!target.pistol && source.pistol) target.pistol = source.pistol;
+  board = board.filter((r) => r !== source);
+  return target;
+}
+function updateBoardIdentity(id, identity, cosmetics = {}) {
+  if (!identity?.userId) return false;
+  let rowById = board.find((r) => r.id === id);
+  let rowByCg = board.find((r) => r.crazyGamesId === identity.userId);
+  if (rowById && rowByCg && rowById !== rowByCg) { rowByCg = mergeBoardRows(rowByCg, rowById); rowById = rowByCg; }
+  const row = rowByCg || rowById;
+  if (!row) return false;
+  let changed = false;
+  if (row.name !== identity.username) { row.name = identity.username; changed = true; }
+  if (row.crazyGamesId !== identity.userId) { row.crazyGamesId = identity.userId; changed = true; }
+  for (const key of ["skin", "pistol"]) if (cosmetics[key] && row[key] !== cosmetics[key]) { row[key] = String(cosmetics[key]).slice(0,20); changed = true; }
+  if (changed) persistBoard();
+  return changed;
+}
+async function resolveHelloIdentity(m) {
+  const token = typeof m.token === "string" && /^[a-f0-9]{64}$/.test(m.token) ? m.token : randomBytes(32).toString("hex");
+  const localId = createHash("sha256").update(token).digest("hex").slice(0,24);
+  const cg = await verifyCrazyToken(m.cgToken);
+  if (!cg) {
+    const existing = sessions.get(localId);
+    return { id: localId, token, name: requireUniqueName(m.name, existing), crazyGamesId: null };
+  }
+  const byCg = board.find((r) => r.crazyGamesId === cg.userId);
+  const byLocal = board.find((r) => r.id === localId);
+  let linked = byCg || byLocal || null;
+  if (byCg && byLocal && byCg !== byLocal) linked = mergeBoardRows(byCg, byLocal);
+  if (linked) { linked.crazyGamesId = cg.userId; linked.name = cg.username; persistBoard(); }
+  return { id: linked?.id || stableCrazyId(cg.userId), token, name: cg.username, crazyGamesId: cg.userId };
+}
 function record(r) {
   if (r.recorded) return;
   r.recorded = true;
   for (const p of r.game.players.filter((p) => !p.bot)) {
-    let row = board.find((a) => a.id === p.id);
+    const session = sessions.get(p.id);
+    let row = session?.crazyGamesId ? board.find((a) => a.crazyGamesId === session.crazyGamesId) : null;
+    if (!row) row = board.find((a) => a.id === p.id);
     if (!row) {
-      row = {
-        id: p.id,
-        name: p.name,
-        wins: 0,
-        kills: 0,
-        deaths: 0,
-        shots: 0,
-        hits: 0,
-        best: 0,
-        matches: 0,
-        history: [],
-      };
+      row = { id: p.id, crazyGamesId: session?.crazyGamesId || null, name: p.name, skin: p.skin || session?.skin || "Default", pistol: p.pistol || session?.pistol || "Classic", wins:0, kills:0, deaths:0, shots:0, hits:0, best:0, matches:0, history:[] };
       board.push(row);
     }
-    const win = won(r.game, p);
+    const win = won(r.game,p);
     row.name = p.name;
-    row.wins += Number(win);
-    row.kills += p.stats.kills;
-    row.deaths += p.stats.deaths;
-    row.shots += p.stats.shots;
-    row.hits += p.stats.hits;
-    row.best = Math.max(row.best, p.stats.best);
-    row.matches++;
-    row.history.push({
-      at: Date.now(),
-      wins: Number(win),
-      kills: p.stats.kills,
-      shots: p.stats.shots,
-      hits: p.stats.hits,
-      best: p.stats.best,
-      matches: 1,
-    });
-    row.history = row.history.filter((h) => h.at > Date.now() - 7 * 86400000);
+    row.crazyGamesId = session?.crazyGamesId || row.crazyGamesId || null;
+    row.skin = p.skin || session?.skin || row.skin || "Default";
+    row.pistol = p.pistol || session?.pistol || row.pistol || "Classic";
+    row.wins = Number(row.wins||0) + Number(win);
+    row.kills = Number(row.kills||0) + p.stats.kills;
+    row.deaths = Number(row.deaths||0) + p.stats.deaths;
+    row.shots = Number(row.shots||0) + p.stats.shots;
+    row.hits = Number(row.hits||0) + p.stats.hits;
+    row.best = Math.max(Number(row.best||0),p.stats.best);
+    row.matches = Number(row.matches||0) + 1;
+    row.history = Array.isArray(row.history) ? row.history : [];
+    row.history.push({ at:Date.now(), wins:Number(win), kills:p.stats.kills, shots:p.stats.shots, hits:p.stats.hits, best:p.stats.best, matches:1 });
+    row.history = row.history.filter((h) => h.at > Date.now() - 7*86400000);
   }
-  const data = JSON.stringify(board);
-  saving = saving
-    .then(async () => {
-      const path = resolve(dataDir, "leaderboard.json");
-      await writeFile(path + ".tmp", data);
-      await rename(path + ".tmp", path);
-    })
-    .catch((e) => console.error("Score persistence failed:", e.message));
+  persistBoard();
 }
 const mime = {
   ".html": "text/html; charset=utf-8",
@@ -302,38 +371,33 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === "/api/leaderboard") {
       const allowed = process.env.ALLOWED_ORIGIN;
-      if (!allowed || req.headers.origin === allowed)
-        res.setHeader("Access-Control-Allow-Origin", allowed || "*");
+      if (!allowed || req.headers.origin === allowed) res.setHeader("Access-Control-Allow-Origin", allowed || "*");
       res.setHeader("Vary", "Origin");
-      let rows = board.map(({ history, ...r }) => {
+      let rows = board.map(({ history, crazyGamesId, ...source }) => {
+        const r = { ...source };
+        const safeHistory = Array.isArray(history) ? history : [];
         if (url.searchParams.get("period") === "week") {
-          const recent = history.filter(
-            (h) => h.at > Date.now() - 7 * 86400000,
-          );
-          for (const field of ["wins", "kills", "shots", "hits", "matches"])
-            r[field] = recent.reduce((n, h) => n + h[field], 0);
-          r.best = Math.max(0, ...recent.map((h) => h.best));
+          const recent = safeHistory.filter((h) => Number(h.at) > Date.now() - 7*86400000);
+          for (const field of ["wins","kills","shots","hits","matches"]) r[field] = recent.reduce((n,h) => n + Number(h[field]||0),0);
+          r.best = Math.max(0,...recent.map((h) => Number(h.best||0)));
         }
         return r;
       });
-      const metric = ["wins", "kills", "best", "matches", "accuracy"].includes(
-        url.searchParams.get("metric"),
-      )
-        ? url.searchParams.get("metric")
-        : "wins";
-      rows = rows
-        .filter((r) => r.matches > 0)
-        .map((r) => ({
-          ...r,
-          accuracy: r.shots ? Math.round((r.hits / r.shots) * 100) : 0,
-        }))
-        .sort((a, b) => b[metric] - a[metric] || b.kills - a.kills)
-        .slice(0, 100);
-      res.writeHead(200, {
-        "content-type": "application/json",
-        "cache-control": "no-store",
-      });
-      res.end(JSON.stringify(rows));
+      const metric = ["wins","kills","best","matches","accuracy"].includes(url.searchParams.get("metric")) ? url.searchParams.get("metric") : "wins";
+      rows = rows.filter((r) => Number(r.matches||0) > 0).map((r) => ({ ...r, wins:Number(r.wins||0), kills:Number(r.kills||0), deaths:Number(r.deaths||0), matches:Number(r.matches||0), best:Number(r.best||0), accuracy:Number(r.shots||0) ? Math.round((Number(r.hits||0)/Number(r.shots||0))*100) : 0 })).sort((a,b) => b[metric]-a[metric] || b.kills-a.kills).map((r,i) => ({...r,rank:i+1}));
+      const top = rows.slice(0,100);
+      if (url.searchParams.get("v") !== "2") {
+        res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});
+        res.end(JSON.stringify(top));
+        return;
+      }
+      const playerId = String(url.searchParams.get("playerId") || "").slice(0,64);
+      const friendIds = new Set(String(url.searchParams.get("friends") || "").split(",").filter((id) => /^[a-f0-9]{24}$/.test(id)).slice(0,100));
+      if (/^[a-f0-9]{24}$/.test(playerId)) friendIds.add(playerId);
+      const self = /^[a-f0-9]{24}$/.test(playerId) ? rows.find((r) => r.id === playerId) || null : null;
+      const friends = friendIds.size ? rows.filter((r) => friendIds.has(r.id)).slice(0,100) : [];
+      res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});
+      res.end(JSON.stringify({rows:top,self,friends,total:rows.length}));
       return;
     }
     const pathname = decodeURIComponent(url.pathname);
@@ -385,7 +449,7 @@ wss.on("connection", (ws, req) => {
     if (!s) ws.close(1008, "Handshake required");
   }, 7000);
   ws.on("error", () => {});
-  ws.on("message", (raw) => {
+  ws.on("message", async (raw) => {
     try {
       if (Date.now() - windowStart > 1000) {
         windowStart = Date.now();
@@ -408,32 +472,28 @@ wss.on("connection", (ws, req) => {
           ws.close();
           return;
         }
-        const token =
-          typeof m.token === "string" && /^[a-f0-9]{64}$/.test(m.token)
-            ? m.token
-            : randomBytes(32).toString("hex");
-        const id = createHash("sha256")
-          .update(token)
-          .digest("hex")
-          .slice(0, 24);
+        const identity = await resolveHelloIdentity(m);
+        const { id, token } = identity;
         const existing = sessions.get(id);
-        const requestedName = requireUniqueName(m.name, existing);
         s = existing;
         if (!s) {
-          s = { id, token, name: requestedName, room: null, ready: false };
-          sessions.set(id, s);
+          s = { id, token, name: identity.name, crazyGamesId: identity.crazyGamesId, room: null, ready: false };
+          sessions.set(id,s);
         }
         if (s.ws && s.ws !== ws) s.ws.close(1000, "Connected elsewhere");
         s.ws = ws;
+        s.token = token;
         s.disconnected = 0;
-        s.name = requestedName;
+        s.name = identity.name;
+        s.crazyGamesId = identity.crazyGamesId || s.crazyGamesId || null;
         s.skin = String(m.skin || "Default").slice(0, 20);
         s.pistol = String(m.pistol || "Classic").slice(0, 20);
         s.trail = String(m.trail || "Default").slice(0, 20);
         s.emote = String(m.emote || "GG").slice(0, 20);
         s.banner = String(m.banner || "Rookie").slice(0, 20);
+        if (identity.crazyGamesId) updateBoardIdentity(s.id,{userId:identity.crazyGamesId,username:s.name},{skin:s.skin,pistol:s.pistol});
         clearTimeout(helloTimeout);
-        send(s, { type: "hello", id: s.id, token, name: s.name });
+        send(s, { type: "hello", id: s.id, token, name: s.name, verifiedCrazyGames: !!s.crazyGamesId });
         const r = rooms.get(s.room);
         if (r) {
           send(s, { type: "lobby", lobby: publicLobby(r) });
@@ -494,9 +554,11 @@ wss.on("connection", (ws, req) => {
       }
       if (m.type === "profile") {
         if (r?.status === "playing") return;
-        s.name = requireUniqueName(m.name, s);
-        for (const k of ["skin", "pistol", "trail", "emote", "banner"])
-          s[k] = String(m[k] || s[k]).slice(0, 20);
+        const cg = await verifyCrazyToken(m.cgToken);
+        if (cg) { s.name = cg.username; s.crazyGamesId = cg.userId; }
+        else if (!s.crazyGamesId) s.name = requireUniqueName(m.name,s);
+        for (const k of ["skin","pistol","trail","emote","banner"]) s[k] = String(m[k] || s[k]).slice(0,20);
+        if (s.crazyGamesId) updateBoardIdentity(s.id,{userId:s.crazyGamesId,username:s.name},{skin:s.skin,pistol:s.pistol});
         return;
       }
       if (m.type === "quick") {
