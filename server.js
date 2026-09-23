@@ -27,30 +27,36 @@ try {
   );
 } catch {}
 
-// Restore the saved Basic Launch leaderboard only when the persistent file is
-// missing or empty. Existing live data is never overwritten and no duplicates
-// are added. Old Guest rows can still be linked to a verified CrazyGames
-// account later when that same player returns.
-if (!Array.isArray(board) || board.length === 0) {
-  board = LEADERBOARD_BACKUP_SEED.map((row) => ({
-    ...row,
-    history: Array.isArray(row.history) ? row.history : [],
-  }));
-  try {
-    await writeFile(resolve(dataDir, "leaderboard.json"), JSON.stringify(board));
-    console.log(`Leaderboard restored from backup: ${board.length} players`);
-  } catch (e) {
-    console.error("Leaderboard backup restore failed:", e.message);
+// Restore/merge the saved Basic Launch leaderboard on every startup.
+// Existing live entries are preserved. Any missing backup player is added back.
+// Matching IDs are never duplicated.
+if (!Array.isArray(board)) board = [];
+
+board = board.map((row) => ({
+  ...row,
+  crazyGamesId: row.crazyGamesId || null,
+  skin: row.skin || "Default",
+  pistol: row.pistol || "Classic",
+  history: Array.isArray(row.history) ? row.history : [],
+}));
+
+let restoredCount = 0;
+for (const saved of LEADERBOARD_BACKUP_SEED) {
+  const existing = board.find((row) => row.id === saved.id);
+  if (!existing) {
+    board.push({
+      ...saved,
+      history: Array.isArray(saved.history) ? saved.history : [],
+    });
+    restoredCount += 1;
   }
-} else {
-  // Make older rows compatible with Weekly / All-Time leaderboard filters.
-  board = board.map((row) => ({
-    ...row,
-    crazyGamesId: row.crazyGamesId || null,
-    skin: row.skin || "Default",
-    pistol: row.pistol || "Classic",
-    history: Array.isArray(row.history) ? row.history : [],
-  }));
+}
+
+try {
+  await writeFile(resolve(dataDir, "leaderboard.json"), JSON.stringify(board));
+  console.log(`Leaderboard backup merge complete: ${restoredCount} restored, ${board.length} total`);
+} catch (e) {
+  console.error("Leaderboard backup merge failed:", e.message);
 }
 const rooms = new Map(),
   sessions = new Map(),
