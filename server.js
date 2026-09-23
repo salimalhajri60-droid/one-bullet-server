@@ -19,12 +19,39 @@ const root = dirname(fileURLToPath(import.meta.url)),
   publicDir = resolve(root, "public"),
   dataDir = resolve(process.env.DATA_DIR || resolve(root, "data"));
 await mkdir(dataDir, { recursive: true });
+const LEADERBOARD_BACKUP_SEED = [{"id":"e2e212694d647cd448c6a143","crazyGamesId":null,"name":"Guest-F782","skin":"Default","pistol":"Classic","wins":0,"kills":9,"deaths":36,"shots":55,"hits":19,"best":2,"matches":2,"history":[]},{"id":"950d1a52be89c5cb4ab01662","crazyGamesId":null,"name":"Guest-F0BE","skin":"Default","pistol":"Classic","wins":0,"kills":4,"deaths":16,"shots":24,"hits":6,"best":1,"matches":1,"history":[]},{"id":"9897acfba31a3771dbf5b9b6","crazyGamesId":null,"name":"Guest-ADA4","skin":"Default","pistol":"Classic","wins":0,"kills":3,"deaths":16,"shots":26,"hits":11,"best":1,"matches":1,"history":[]},{"id":"383a0770224a613b8cfdc0e3","crazyGamesId":null,"name":"Guest-F19A","skin":"Default","pistol":"Classic","wins":0,"kills":2,"deaths":13,"shots":21,"hits":4,"best":2,"matches":1,"history":[]},{"id":"ee4cb0144634e2902e1b8f59","crazyGamesId":null,"name":"Guest-4EFE","skin":"Default","pistol":"Classic","wins":0,"kills":1,"deaths":7,"shots":12,"hits":2,"best":1,"matches":1,"history":[]},{"id":"83e080a6c923cd1f3bd6ff8c","crazyGamesId":null,"name":"CharmingKid.69tH","skin":"Default","pistol":"Classic","wins":0,"kills":1,"deaths":16,"shots":5,"hits":1,"best":1,"matches":1,"history":[]},{"id":"c3298edfd2266b30497b640e","crazyGamesId":null,"name":"Guest-D7A3","skin":"Default","pistol":"Classic","wins":0,"kills":0,"deaths":1,"shots":0,"hits":0,"best":0,"matches":1,"history":[]},{"id":"f0b585f543dde757c1f7b061","crazyGamesId":null,"name":"GentleCaveman.Yndb","skin":"Default","pistol":"Classic","wins":0,"kills":0,"deaths":22,"shots":1,"hits":0,"best":0,"matches":1,"history":[]}];
 let board = [];
 try {
   board = JSON.parse(
     await readFile(resolve(dataDir, "leaderboard.json"), "utf8"),
   );
 } catch {}
+
+// Restore the saved Basic Launch leaderboard only when the persistent file is
+// missing or empty. Existing live data is never overwritten and no duplicates
+// are added. Old Guest rows can still be linked to a verified CrazyGames
+// account later when that same player returns.
+if (!Array.isArray(board) || board.length === 0) {
+  board = LEADERBOARD_BACKUP_SEED.map((row) => ({
+    ...row,
+    history: Array.isArray(row.history) ? row.history : [],
+  }));
+  try {
+    await writeFile(resolve(dataDir, "leaderboard.json"), JSON.stringify(board));
+    console.log(`Leaderboard restored from backup: ${board.length} players`);
+  } catch (e) {
+    console.error("Leaderboard backup restore failed:", e.message);
+  }
+} else {
+  // Make older rows compatible with Weekly / All-Time leaderboard filters.
+  board = board.map((row) => ({
+    ...row,
+    crazyGamesId: row.crazyGamesId || null,
+    skin: row.skin || "Default",
+    pistol: row.pistol || "Classic",
+    history: Array.isArray(row.history) ? row.history : [],
+  }));
+}
 const rooms = new Map(),
   sessions = new Map(),
   MAX_ROOMS = 80,
