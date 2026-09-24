@@ -130,10 +130,19 @@ const options = (o) => ({
   bots: Math.max(0, Math.min(7, Math.floor(Number(o?.bots) || 0))),
   duration: 180,
 });
-const send = (s, data) => {
-  if (s?.ws?.readyState === WebSocket.OPEN && s.ws.bufferedAmount < 250000)
-    s.ws.send(JSON.stringify(data));
+const sendText = (s, text, isState = false) => {
+  if (s?.ws?.readyState !== WebSocket.OPEN) return false;
+
+  // Do not let old realtime snapshots pile up in TCP buffers. Keeping only
+  // fresh state is much better for an action game than delivering stale frames.
+  const limit = isState ? 32 * 1024 : 256 * 1024;
+  if (s.ws.bufferedAmount > limit) return false;
+
+  s.ws.send(text);
+  return true;
 };
+const send = (s, data) =>
+  sendText(s, JSON.stringify(data), data?.type === "state");
 
 const CHAT_LIMIT = 120;
 const CHAT_COOLDOWN_MS = 650;
@@ -178,7 +187,11 @@ const publicLobby = (r) => ({
       : 0,
 });
 function broadcast(r, data) {
-  for (const s of r.members) send(s, data);
+  // Serialize once per room instead of once per player. This substantially
+  // reduces CPU work at 30 realtime snapshots/second.
+  const encoded = JSON.stringify(data);
+  const isState = data?.type === "state";
+  for (const s of r.members) sendText(s, encoded, isState);
 }
 function lobby(r) {
   broadcast(r, { type: "lobby", lobby: publicLobby(r) });
@@ -464,6 +477,7 @@ const wss = new WebSocketServer({
   perMessageDeflate: false,
 });
 wss.on("connection", (ws, req) => {
+  try { ws._socket?.setNoDelay?.(true); } catch {}
   if (wss.clients.size > MAX_CLIENTS) {
     ws.close(1013, "Server full");
     return;
@@ -709,7 +723,8 @@ setInterval(() => {
   const now = performance.now();
   acc += Math.min(0.2, (now - last) / 1000);
   last = now;
-  while (acc >= 1 / 60) {
+  let simSteps = 0;
+  while (acc >= 1 / 60 && simSteps < 5) {
     for (const r of rooms.values()) {
       if (
         r.status === "lobby" &&
@@ -729,7 +744,11 @@ setInterval(() => {
       }
     }
     acc -= 1 / 60;
+    simSteps++;
   }
+  // If the process was paused for a long time, discard excessive backlog
+  // instead of spending many frames catching up and increasing network delay.
+  if (simSteps >= 5 && acc > 1 / 30) acc = 0;
   if (++frame % 2 === 0)
     for (const r of rooms.values())
       if (r.status === "playing")
