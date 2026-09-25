@@ -1645,13 +1645,41 @@ const mime = {
 };
 const server = http.createServer(async (req, res) => {
   try {
+    const requestOrigin = String(req.headers.origin || "");
+
+    // CrazyGames loads the game from changing *.crazygames.com subdomains.
+    // Reflect that Origin so /health and API requests work from CrazyGames.
+    let allowOrigin = "*";
+    if (requestOrigin) {
+      try {
+        const host = new URL(requestOrigin).hostname.toLowerCase();
+        if (
+          host === "crazygames.com" ||
+          host.endsWith(".crazygames.com") ||
+          host === "localhost" ||
+          host === "127.0.0.1"
+        ) {
+          allowOrigin = requestOrigin;
+        }
+      } catch {}
+    }
+
+    res.setHeader("Access-Control-Allow-Origin", allowOrigin);
+    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Max-Age", "86400");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     const url = new URL(req.url, "http://local");
     if (url.pathname === "/health") {
       res.writeHead(200, {
         "content-type": "application/json",
         "cache-control": "no-store",
-        "access-control-allow-origin": "*",
-        "access-control-allow-methods": "GET, OPTIONS",
       });
       res.end(
         JSON.stringify({ ok: true, version: VERSION, rooms: rooms.size }),
@@ -1659,9 +1687,6 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (url.pathname === "/api/leaderboard") {
-      const allowed = process.env.ALLOWED_ORIGIN;
-      if (!allowed || req.headers.origin === allowed) res.setHeader("Access-Control-Allow-Origin", allowed || "*");
-      res.setHeader("Vary", "Origin");
       let rows = board.map(({ history, crazyGamesId, ...source }) => {
         const r = { ...source };
         const safeHistory = Array.isArray(history) ? history : [];
@@ -1725,10 +1750,22 @@ wss.on("connection", (ws, req) => {
     ws.close(1013, "Server full");
     return;
   }
-  if (
-    process.env.ALLOWED_ORIGIN &&
-    req.headers.origin !== process.env.ALLOWED_ORIGIN
-  ) {
+  const wsOrigin = String(req.headers.origin || "");
+  const configuredOrigin = String(process.env.ALLOWED_ORIGIN || "").trim();
+  let wsOriginAllowed = !configuredOrigin || wsOrigin === configuredOrigin;
+
+  if (!wsOriginAllowed && wsOrigin) {
+    try {
+      const host = new URL(wsOrigin).hostname.toLowerCase();
+      wsOriginAllowed =
+        host === "crazygames.com" ||
+        host.endsWith(".crazygames.com") ||
+        host === "localhost" ||
+        host === "127.0.0.1";
+    } catch {}
+  }
+
+  if (!wsOriginAllowed) {
     ws.close(1008, "Origin rejected");
     return;
   }
