@@ -1684,7 +1684,7 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({
         ok: true,
         service: "ONE BULLET",
-        websocket: "/ws",
+        websocket: ["/", "/ws"],
         health: "/health",
         version: VERSION,
       }));
@@ -1697,7 +1697,7 @@ const server = http.createServer(async (req, res) => {
         "cache-control": "no-store",
       });
       res.end(
-        JSON.stringify({ ok: true, version: VERSION, rooms: rooms.size, websocket: "/ws" }),
+        JSON.stringify({ ok: true, version: VERSION, rooms: rooms.size, websocket: ["/", "/ws"] }),
       );
       return;
     }
@@ -1765,7 +1765,7 @@ const wss = new WebSocketServer({
 server.on("upgrade", (req, socket, head) => {
   try {
     const url = new URL(req.url || "/", "http://local");
-    if (url.pathname !== "/ws") {
+    if (url.pathname !== "/" && url.pathname !== "/ws") {
       socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
       socket.destroy();
       return;
