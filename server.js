@@ -1676,13 +1676,28 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const url = new URL(req.url, "http://local");
+    if (url.pathname === "/") {
+      res.writeHead(200, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      });
+      res.end(JSON.stringify({
+        ok: true,
+        service: "ONE BULLET",
+        websocket: "/ws",
+        health: "/health",
+        version: VERSION,
+      }));
+      return;
+    }
+
     if (url.pathname === "/health") {
       res.writeHead(200, {
         "content-type": "application/json",
         "cache-control": "no-store",
       });
       res.end(
-        JSON.stringify({ ok: true, version: VERSION, rooms: rooms.size }),
+        JSON.stringify({ ok: true, version: VERSION, rooms: rooms.size, websocket: "/ws" }),
       );
       return;
     }
@@ -1740,10 +1755,30 @@ const server = http.createServer(async (req, res) => {
   }
 });
 const wss = new WebSocketServer({
-  server,
+  noServer: true,
   maxPayload: 4096,
   perMessageDeflate: false,
 });
+
+// Handle WebSocket upgrades explicitly on /ws.
+// This is more reliable behind reverse proxies such as Back4app.
+server.on("upgrade", (req, socket, head) => {
+  try {
+    const url = new URL(req.url || "/", "http://local");
+    if (url.pathname !== "/ws") {
+      socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit("connection", ws, req);
+    });
+  } catch {
+    try { socket.destroy(); } catch {}
+  }
+});
+
 wss.on("connection", (ws, req) => {
   try { ws._socket?.setNoDelay?.(true); } catch {}
   if (wss.clients.size > MAX_CLIENTS) {
