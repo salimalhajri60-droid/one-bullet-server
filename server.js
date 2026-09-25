@@ -2114,7 +2114,9 @@ setInterval(() => {
 
   if (simSteps >= 5 && acc > 1 / 30) acc = 0;
 
-  if (++frame % 2 === 0) {
+  // 20 Hz authoritative snapshots on the free shared CPU.
+  // Physics remains 60 Hz, but JSON serialization/network work drops by ~33%.
+  if (++frame % 3 === 0) {
     for (const r of [...rooms.values()]) {
       if (r.status !== "playing") continue;
       try {
