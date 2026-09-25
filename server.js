@@ -2071,10 +2071,10 @@ process.on("unhandledRejection", (reason) => {
   console.error("Unhandled promise rejection:", reason);
 });
 server.listen(
-  Number(process.env.PORT) || 4173,
+  Number(process.env.PORT) || 8080,
   process.env.HOST || "0.0.0.0",
   () =>
     console.log(
-      `ONE BULLET ready at http://localhost:${Number(process.env.PORT) || 4173}`,
+      `ONE BULLET ready at http://localhost:${Number(process.env.PORT) || 8080}`,
     ),
 );
