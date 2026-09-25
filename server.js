@@ -1165,7 +1165,7 @@ const {MODE_RULES,MODIFIERS,teamMode,noRespawn,modeInit,modeVote,modeTally,modeS
 
 const root = dirname(fileURLToPath(import.meta.url)),
   publicDir = resolve(root, "public"),
-  dataDir = resolve(process.env.DATA_DIR || resolve(root, "data"));
+  dataDir = resolve(process.env.DATA_DIR || "/tmp/one-bullet-data");
 await mkdir(dataDir, { recursive: true });
 const LEADERBOARD_BACKUP_SEED = [{"id":"e2e212694d647cd448c6a143","crazyGamesId":null,"name":"Guest-F782","skin":"Default","pistol":"Classic","wins":0,"kills":9,"deaths":36,"shots":55,"hits":19,"best":2,"matches":2,"history":[]},{"id":"950d1a52be89c5cb4ab01662","crazyGamesId":null,"name":"Guest-F0BE","skin":"Default","pistol":"Classic","wins":0,"kills":4,"deaths":16,"shots":24,"hits":6,"best":1,"matches":1,"history":[]},{"id":"9897acfba31a3771dbf5b9b6","crazyGamesId":null,"name":"Guest-ADA4","skin":"Default","pistol":"Classic","wins":0,"kills":3,"deaths":16,"shots":26,"hits":11,"best":1,"matches":1,"history":[]},{"id":"383a0770224a613b8cfdc0e3","crazyGamesId":null,"name":"Guest-F19A","skin":"Default","pistol":"Classic","wins":0,"kills":2,"deaths":13,"shots":21,"hits":4,"best":2,"matches":1,"history":[]},{"id":"ee4cb0144634e2902e1b8f59","crazyGamesId":null,"name":"Guest-4EFE","skin":"Default","pistol":"Classic","wins":0,"kills":1,"deaths":7,"shots":12,"hits":2,"best":1,"matches":1,"history":[]},{"id":"83e080a6c923cd1f3bd6ff8c","crazyGamesId":null,"name":"CharmingKid.69tH","skin":"Default","pistol":"Classic","wins":0,"kills":1,"deaths":16,"shots":5,"hits":1,"best":1,"matches":1,"history":[]},{"id":"c3298edfd2266b30497b640e","crazyGamesId":null,"name":"Guest-D7A3","skin":"Default","pistol":"Classic","wins":0,"kills":0,"deaths":1,"shots":0,"hits":0,"best":0,"matches":1,"history":[]},{"id":"f0b585f543dde757c1f7b061","crazyGamesId":null,"name":"GentleCaveman.Yndb","skin":"Default","pistol":"Classic","wins":0,"kills":0,"deaths":22,"shots":1,"hits":0,"best":0,"matches":1,"history":[]}];
 let board = [];
@@ -1645,27 +1645,7 @@ const mime = {
 };
 const server = http.createServer(async (req, res) => {
   try {
-    const requestOrigin = String(req.headers.origin || "");
-
-    // CrazyGames loads the game from changing *.crazygames.com subdomains.
-    // Reflect that Origin so /health and API requests work from CrazyGames.
-    let allowOrigin = "*";
-    if (requestOrigin) {
-      try {
-        const host = new URL(requestOrigin).hostname.toLowerCase();
-        if (
-          host === "crazygames.com" ||
-          host.endsWith(".crazygames.com") ||
-          host === "localhost" ||
-          host === "127.0.0.1"
-        ) {
-          allowOrigin = requestOrigin;
-        }
-      } catch {}
-    }
-
-    res.setHeader("Access-Control-Allow-Origin", allowOrigin);
-    res.setHeader("Vary", "Origin");
+    res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
     res.setHeader("Access-Control-Max-Age", "86400");
@@ -2114,9 +2094,7 @@ setInterval(() => {
 
   if (simSteps >= 5 && acc > 1 / 30) acc = 0;
 
-  // 20 Hz authoritative snapshots on the free shared CPU.
-  // Physics remains 60 Hz, but JSON serialization/network work drops by ~33%.
-  if (++frame % 3 === 0) {
+  if (++frame % 2 === 0) {
     for (const r of [...rooms.values()]) {
       if (r.status !== "playing") continue;
       try {
