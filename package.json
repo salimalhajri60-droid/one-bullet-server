@@ -1,18 +1,15 @@
 {
-  "name": "one-bullet",
+  "name": "one-bullet-server",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "One bullet. Every shot matters. Browser arcade shooter with authoritative multiplayer.",
-  "scripts": {
-    "start": "node server.js",
-    "test": "node --test tests/*.test.js",
-    "check": "node --check server.js && node --check public/engine.js && node --check public/app.js && node --check public/render.js"
-  },
   "engines": {
     "node": ">=22"
   },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "ws": "^8.18.3"
+    "ws": "^8.18.0"
   }
 }
